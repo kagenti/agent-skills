@@ -15,6 +15,7 @@ Built to the [Agent Skills specification](https://agentskills.io/specification).
 | [automation-health-dashboard](skills/automation-health-dashboard/) | Generate executive-facing dashboard combining all program metrics |
 | [github-weekly-report](skills/github-weekly-report/) | Generate weekly org activity reports with merged PRs, CI health, and active-epic tracking |
 | [github-pr-review](skills/github-pr-review/) | Automated PR review: conventions, security, CI status, inline comments |
+| [byo-rossoctl-cortex](skills/byo-rossoctl-cortex/) | Bring up a local rossoctl cortex (AuthBridge plugin pipeline) to host an agent; per-agent LiteLLM budget tracking isolated by env var |
 
 ## Installation
 

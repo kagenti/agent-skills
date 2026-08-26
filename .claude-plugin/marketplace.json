@@ -55,6 +55,15 @@
       "skills": [
         "./skills/github-pr-review"
       ]
+    },
+    {
+      "name": "byo-rossoctl-cortex",
+      "description": "Bring up a local rossoctl cortex (AuthBridge plugin pipeline) to host an agent, with per-agent LiteLLM budget tracking",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/byo-rossoctl-cortex"
+      ]
     }
   ]
 }
