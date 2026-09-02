@@ -64,7 +64,7 @@ Full details, per-plugin config fields, and direction are in
 | `ibac` | outbound | LLM-judge intent-based access control on outbound tool calls. |
 | `opa` | both | OPA policy bundles on inbound + outbound requests. |
 | `sparc` | outbound | Pre-tool reflection; blocks ungrounded/hallucinated tool calls. |
-| `session-budget` | outbound | Per-session token/call/duration budgets via Redis. |
+| `session-budget` | outbound | Per-session token/call/duration budgets via Redis. Opt-in build tag; try it via the `authbridge-proxy-sessionbudget` release binary (see Step 1 alternative). |
 | `token-broker` | outbound | Exchange tokens via an external broker per route. |
 | `a2a-parser` / `mcp-parser` / `inference-parser` | parsers | Parse A2A / MCP / OpenAI-inference traffic into `pctx.Extensions.*` for downstream guardrails. |
 | `context-guru` | outbound | Compact the outbound LLM request context (opt-in build tag). |
@@ -78,50 +78,57 @@ pipeline**, so plugins acting on the command's own LLM/tool egress — including
 
 ## Procedure
 
-### Step 1 — Get the `rossoctl` binary
+### Step 1 — Get an `authbridge-proxy` binary (primary path)
 
-This skill does **not** assume any repo is already checked out. If `rossoctl` is not
-already on `PATH`, clone and build it. It is pure Go (build with `CGO_ENABLED=0`).
+The fastest way is to download a prebuilt `authbridge-proxy` binary from the
+cortex GitHub Release. This is the standalone pipeline runner — no `rossoctl`
+required for the pipeline itself (rossoctl only adds the `authbridge exec`
+convenience wrapper; see Step 4 for the manual equivalent).
+
+Pick the variant for the plugin set you want:
+
+| Variant | Tarball | Includes |
+|---|---|---|
+| default | `authbridge-proxy_<ver>_<os>_<arch>.tar.gz` | full plugin set (litellm-budget-track, jwt-validation, token-exchange, parsers, ibac, opa, sparc, token-broker) |
+| `-lite` | `authbridge-proxy-lite_<ver>_<os>_<arch>.tar.gz` | jwt-validation + token-exchange only |
+| `-sessionbudget` | `authbridge-proxy-sessionbudget_<ver>_<os>_<arch>.tar.gz` | default + opt-in `session-budget` plugin (needs Redis) |
+
+```sh
+# Detect host, download, verify, install. Replace <VER> with a v* tag from
+# https://github.com/rossoctl/cortex/releases (or use "latest" via the API).
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')          # linux | darwin
+ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && ARCH=amd64
+VER=<VER>                                             # e.g. v0.4.0
+VARIANT=""                                            # "" | "-lite" | "-sessionbudget"
+
+curl -fsSLO "https://github.com/rossoctl/cortex/releases/download/${VER}/authbridge-proxy${VARIANT}_${VER}_${OS}_${ARCH}.tar.gz"
+curl -fsSLO "https://github.com/rossoctl/cortex/releases/download/${VER}/checksums.txt"
+grep "authbridge-proxy${VARIANT}_${VER}_${OS}_${ARCH}.tar.gz" checksums.txt | sha256sum -c -
+tar -xzf "authbridge-proxy${VARIANT}_${VER}_${OS}_${ARCH}.tar.gz"
+
+# macOS only: clear Gatekeeper quarantine so the binary can execute.
+[ "$OS" = "darwin" ] && xattr -dr com.apple.quarantine ./authbridge-proxy
+
+./authbridge-proxy -version
+```
+
+### Step 1 (alternative) — Build `rossoctl` from source
+
+If you want the `rossoctl authbridge exec` wrapper (auto-injects `HTTPS_PROXY`
+and CA-trust env vars into the child process), build rossoctl. Plain Go build
+pulls the current cortex authlib from the module proxy — no fork clone or
+replace directive needed since the litellm-budget-track streaming fix landed
+on `rossoctl/cortex` main.
 
 ```sh
 # Already installed? Use it.
 command -v rossoctl && rossoctl version
-```
 
-For working `litellm-budget-track` cost tracking you need the **fixed `cortex`
-branch** (not yet in a tagged authlib), so clone `rossoctl-cli` and `cortex` **as
-siblings** in one scratch dir and build `rossoctl` against the local `cortex` with a
-replace directive — no manual patching. The `fix_streaming_litellm_plugin` branch is
-stacked on `fix_litellm_plugin`, so it has the response-header fix (+ `-original`
-fallback) **and** streaming (SSE) cost tracking for Claude Code's `/v1/messages`:
-
-```sh
-mkdir -p "$HOME/rossoctl-src" && cd "$HOME/rossoctl-src"   # scratch dir; anywhere writable
-git clone https://github.com/rossoctl/rossoctl-cli.git
-git clone -b fix_streaming_litellm_plugin https://github.com/aslom/cortex.git
-#   branch: https://github.com/aslom/cortex/tree/fix_streaming_litellm_plugin
-#   (header fix + -original fallback + streaming usage pricing).
-#   For the header fix only (no streaming) use -b fix_litellm_plugin.
-
-cd "$HOME/rossoctl-src/rossoctl-cli"
-# replace path is relative to rossoctl-cli's go.mod, i.e. the sibling cortex clone:
-go mod edit -replace github.com/rossoctl/cortex/authbridge/authlib=../cortex/authbridge/authlib
-GOFLAGS=-mod=mod go mod tidy
-CGO_ENABLED=0 go build -o bin/rossoctl .
-export PATH="$PWD/bin:$PATH"       # or: sudo mv bin/rossoctl /usr/local/bin/
-rossoctl version
-```
-
-If you don't need cost tracking (or once the fix lands in an upstream
-`rossoctl/cortex` release), a plain build pulls the authlib automatically — no cortex
-clone or replace needed:
-
-```sh
 git clone https://github.com/rossoctl/rossoctl-cli.git && cd rossoctl-cli
 CGO_ENABLED=0 go build -o bin/rossoctl . && export PATH="$PWD/bin:$PATH"
 ```
 
-Or install a prebuilt release: `curl -fsSL
+Or install a rossoctl prebuilt release: `curl -fsSL
 https://raw.githubusercontent.com/rossoctl/rossoctl-cli/main/downloadRossoctl | sh`
 then `export PATH="$PATH:$HOME/.config/rossoctl"`.
 
@@ -159,7 +166,7 @@ Copy `templates/litellm-budget-track.yaml` into a working dir (e.g.
       # (curl / OpenAI /v1/chat/completions), which is priced from the header.
       input_cost_per_token: 0.000003          # example: $3 / 1M UNCACHED input tokens
       output_cost_per_token: 0.000015         # example: $15 / 1M output tokens
-      # Prompt-cache tiers — set to your provider's real prices (see caveat 6);
+      # Prompt-cache tiers — set to your provider's real prices (see caveat 5);
       # if omitted they default to input_cost_per_token (flat), overstating
       # cache-heavy Claude Code traffic up to ~10× and tripping the 429 early.
       cache_write_cost_per_token: 0.00000375  # example: $3.75 / 1M (write premium)
@@ -186,6 +193,30 @@ CORTEX_SPEND_FILE="$PWD/.cortex/spend-alpha.json" CORTEX_MAX_BUDGET=5.00 \
 CORTEX_SPEND_FILE="$PWD/.cortex/spend-beta.json" CORTEX_MAX_BUDGET=2.00 \
   rossoctl authbridge exec --config ./.cortex/CONFIG.yaml \
     --instanceName beta --sessionServer "" -- claude -p "…"
+```
+
+**Without rossoctl** (using the standalone binary from Step 1): run
+`authbridge-proxy` in one shell and export the proxy + CA env vars in the
+shell that runs `claude`. The forward proxy binds to a kernel-picked port
+(from `forward_proxy_addr: "localhost:0"` in the config); grep the log for
+the port. This is what `rossoctl authbridge exec` does automatically.
+
+```sh
+export CORTEX_CA_DIR="$PWD/.cortex/tls-bridge-ca"
+export CORTEX_SPEND_FILE="$PWD/.cortex/spend-alpha.json"
+export CORTEX_MAX_BUDGET=5.00
+
+# Shell 1: run the pipeline
+./authbridge-proxy --config ./.cortex/CONFIG.yaml 2>&1 | tee /tmp/authbridge.log
+
+# Shell 2: point claude at the proxy
+PORT=$(awk '/forward-proxy.*addr=127.0.0.1:/{ sub(/.*addr=127.0.0.1:/,""); sub(/[^0-9].*/,""); print; exit }' /tmp/authbridge.log)
+export HTTPS_PROXY="http://127.0.0.1:${PORT}"
+export HTTP_PROXY="${HTTPS_PROXY}"
+export SSL_CERT_FILE="$CORTEX_CA_DIR/ca.crt"
+export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+export NODE_EXTRA_CA_CERTS="$SSL_CERT_FILE"
+claude -p "…"
 ```
 
 The ledger (`spend-<agent>.json`) accumulates `{date,total_spend,total_calls}` and
@@ -215,34 +246,23 @@ resets at midnight UTC. When `total_spend >= max_budget`, further requests get
    ```
    Verify per-agent tracking against an endpoint that emits the bare header.
    Also note that **streamed** responses (Claude Code's `/v1/messages`, or any
-   `stream:true` call) report cost `0` in the header — the total is not known when
-   the headers are sent. To track those, use the streaming-enhanced plugin
-   (`fix_streaming_litellm_plugin`) and set `input_cost_per_token` /
-   `output_cost_per_token` in the config (see the template) so cost is computed from
-   the parsed token usage.
+   `stream:true` call) report cost `0` in the header — the total is not known
+   when the headers are sent. To track those, set `input_cost_per_token` /
+   `output_cost_per_token` in the config (see the template) so cost is computed
+   from the parsed token usage. The response-header fix and streaming pricing
+   both landed on `rossoctl/cortex` main (PRs #815 and #816); older builds that
+   predate them silently record `$0`.
 
-2. **Plugin bug (fix lives on a branch, not yet upstream).** Older
-   `litellm-budget-track` reads `pctx.Headers` (the *request* headers) in
-   `OnResponse` instead of `pctx.ResponseHeaders`, so it **never** records cost. If
-   your build shows `$0` despite the cost header being present, you built against an
-   unfixed `cortex`. Use the ready-made branch
-   [`aslom/cortex@fix_streaming_litellm_plugin`](https://github.com/aslom/cortex/tree/fix_streaming_litellm_plugin)
-   as shown in Step 1 (`git clone -b fix_streaming_litellm_plugin …`). It is stacked on
-   `fix_litellm_plugin`, so it has the response-header fix
-   (`pctx.ResponseHeaders.Get(...)`, mirroring the `opa` plugin), the `-original`
-   fallback, **and** streaming usage-based pricing — plus unit tests. No manual
-   patching required. (For the header fix alone, `fix_litellm_plugin` suffices.)
-
-3. **TLS bridge is mandatory for HTTPS cost tracking** — without it, egress is an
+2. **TLS bridge is mandatory for HTTPS cost tracking** — without it, egress is an
    opaque CONNECT tunnel and the plugin can't read response headers.
 
-4. **`ca_dir` must persist** across runs and be writable; regenerating the CA each run
+3. **`ca_dir` must persist** across runs and be writable; regenerating the CA each run
    breaks client trust.
 
-5. **Sandbox paths** — write configs, ledgers, CA dir, and logs under the project
+4. **Sandbox paths** — write configs, ledgers, CA dir, and logs under the project
    tree, not `/tmp`, if the environment restricts `/tmp`.
 
-6. **Prompt caching (streaming pricing only).** Claude Code caches heavily, and a
+5. **Prompt caching (streaming pricing only).** Claude Code caches heavily, and a
    provider charges a **premium** to *write* a cache entry and a steep **discount** to
    *read* one — so two turns with identical prompt-token counts can differ ~10× in
    price. The usage fallback prices the tiers separately: `input_cost_per_token`
