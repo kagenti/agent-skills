@@ -96,14 +96,15 @@ stacked on `fix_litellm_plugin`, so it has the response-header fix (+ `-original
 fallback) **and** streaming (SSE) cost tracking for Claude Code's `/v1/messages`:
 
 ```sh
-mkdir -p "$HOME/rossoctl-src" && cd "$HOME/rossoctl-src"   # scratch dir; anywhere writable
+mkdir -p "$HOME/rossoctl-src"
+cd "$HOME/rossoctl-src"   # scratch dir; anywhere writable
 git clone https://github.com/rossoctl/rossoctl-cli.git
 git clone -b fix_streaming_litellm_plugin https://github.com/aslom/cortex.git
 #   branch: https://github.com/aslom/cortex/tree/fix_streaming_litellm_plugin
 #   (header fix + -original fallback + streaming usage pricing).
 #   For the header fix only (no streaming) use -b fix_litellm_plugin.
 
-cd "$HOME/rossoctl-src/rossoctl-cli"
+cd rossoctl-cli
 # replace path is relative to rossoctl-cli's go.mod, i.e. the sibling cortex clone:
 go mod edit -replace github.com/rossoctl/cortex/authbridge/authlib=../cortex/authbridge/authlib
 GOFLAGS=-mod=mod go mod tidy
